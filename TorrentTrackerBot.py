@@ -1,35 +1,51 @@
 import discord
 from discord.ext import commands, tasks
 import qbittorrentapi
+import asyncio
 import os
+
+# Configuration Settings
+config = {
+    'qbt_host': 'localhost',            # Replace 'localhost' with the IP address of your qBittorrent server.
+    'qbt_port': 8080,                   # Replace if Using Non-Default Web Port
+    'qbt_username': 'admin',            # Replace 'admin' with your qBittorrent username.
+    'qbt_password': 'yourpassword',     # Replace 'yourpassword' with your qBittorrent password.
+    'discord_token': 'your_bot_token',  # Replace 'your_bot_token' with your Discord bot token.
+    'discord_command_prefix': '$',      # Future Implementation
+    'update_channel_id': 'Channel_ID',  # Set update_channel_id to the ID of the Discord channel where you want the updates to be sent.
+}
+
 
 # Initialize the qBittorrent client
 qbt_client = qbittorrentapi.Client(
-    host='localhost', port=8080, 
-    username='admin', 
-    password='yourpassword'  # Make sure to secure your password properly
+    host=config['qbt_host'],
+    port=config['qbt_port'],
+    username=config['qbt_username'],
+    password=config['qbt_password']
 )
 
-# Initialize Discord Intents and Bot
+# Initialize Discord Bot
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=config['discord_command_prefix'], intents=intents, help_command=None)
 
-# Function to update downloading torrents
-def update_downloading_torrents():
+# Async function to fetch torrent info using executor
+async def fetch_torrent_info():
+    torrents = await asyncio.get_running_loop().run_in_executor(None, lambda: qbt_client.torrents_info(status_filter='downloading'))
+    return [{'name': torrent.name, 'progress': torrent.progress * 100} for torrent in torrents if torrent.progress < 1.0]
+
+# Function to update Discord Rich Presence
+async def update_discord_rpc():
     try:
-        torrents = qbt_client.torrents_info(status_filter='downloading')
-        return [{'name': torrent.name, 'progress': torrent.progress * 100} for torrent in torrents if torrent.progress < 1.0]
-    except qbittorrentapi.APIError as e:
-        print(f"API error occurred while fetching torrents: {e}")
-        return []
+        torrents = await fetch_torrent_info()
+        activity = discord.Activity(name=f"{len(torrents)} active torrents", type=discord.ActivityType.watching)
+        await bot.change_presence(activity=activity)
     except Exception as e:
-        print(f"Failed to fetch torrents due to an unexpected error: {e}")
-        return []
+        print(f"Failed to update RPC: {e}")
 
-# Load last_message_id from file
+# Load and save last_message_id for Discord updates
 def load_last_message_id():
     try:
         with open('last_message_id.txt', 'r') as file:
@@ -37,29 +53,32 @@ def load_last_message_id():
     except (FileNotFoundError, ValueError):
         return None
 
-# Save last_message_id to file
 def save_last_message_id(message_id):
     with open('last_message_id.txt', 'w') as file:
         file.write(str(message_id))
 
-last_message_id = load_last_message_id()  # Load last message ID at startup
-update_channel_id = CHANNELID  # Set your channel ID here
+last_message_id = load_last_message_id()
 
 @bot.event
 async def on_ready():
     print(f'We have logged in as {bot.user}')
     print("------------------------------------------------")
-    scheduled_update.start()
+    update_rpc_task.start()  # Start the Rich Presence update task
+    scheduled_update.start()  # Start the scheduled chat update task
+
+@tasks.loop(minutes=1)
+async def update_rpc_task():
+    await update_discord_rpc()
 
 @tasks.loop(minutes=1)
 async def scheduled_update():
-    channel = bot.get_channel(update_channel_id)
+    channel = bot.get_channel(config['update_channel_id'])
     if channel:
         await send_update(channel)
 
 async def send_update(channel):
     global last_message_id
-    torrents_list = update_downloading_torrents()
+    torrents_list = await fetch_torrent_info()
 
     if torrents_list:
         embed = discord.Embed(title="Downloading Torrents", description="Current active downloads:")
@@ -82,4 +101,4 @@ async def send_update(channel):
         save_last_message_id(last_message_id)  # Save new message ID
 
 # Bot token and run setup
-bot.run('your_bot_token')
+bot.run(config['discord_token'])
